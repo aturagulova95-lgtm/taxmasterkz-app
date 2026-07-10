@@ -463,8 +463,6 @@ def page_home():
     profile = st.session_state.taxpayer_profile
     c = st.session_state.computed
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Загружено файлов", len(st.session_state.files_registry))
        col1, col2, col3, col4 = st.columns(4)
 
     col1.metric("Загружено файлов", len(st.session_state.files_registry))
@@ -501,8 +499,6 @@ def page_home():
     else:
         col3.metric("Реализация без НДС, всего", "—")
         col4.metric("Выявлено рисков", "—")
-
-    st.divider()
 
     st.divider()
     if profile:
