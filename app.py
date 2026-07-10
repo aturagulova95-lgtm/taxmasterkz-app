@@ -463,7 +463,7 @@ def page_home():
     profile = st.session_state.taxpayer_profile
     c = st.session_state.computed
 
-       col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = st.columns(4)
 
     col1.metric("Загружено файлов", len(st.session_state.files_registry))
 
