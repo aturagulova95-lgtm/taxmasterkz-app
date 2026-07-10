@@ -467,17 +467,17 @@ def page_home():
     col1.metric("Загружено файлов", len(st.session_state.files_registry))
     years = sorted({y for card in st.session_state.files_registry for y in (card.get("years") or [])})
     col2.metric("Годы анализа", f"{years[0]}–{years[-1]}" if years else "—")
-    if c is not None and isinstance(c, dict):
-    dynamics = c.get("dynamics")
-    findings = c.get("findings", [])
+          if c is not None and isinstance(c, dict):
+        dynamics = c.get("dynamics")
+        findings = c.get("findings", [])
 
-    if dynamics is not None and hasattr(dynamics, "columns") and "sales_no_vat" in dynamics.columns and not dynamics.empty:
-        total_sales = sum(d.get("sales_no_vat", 0) for d in dynamics.to_dict("records"))
-    else:
-        total_sales = 0
+        if dynamics is not None and hasattr(dynamics, "columns") and "sales_no_vat" in dynamics.columns and not dynamics.empty:
+            total_sales = sum(d.get("sales_no_vat", 0) for d in dynamics.to_dict("records"))
+        else:
+            total_sales = 0
 
-    col3.metric("Реализация без НДС, всего", f"{total_sales:,.0f}".replace(",", " "))
-    col4.metric("Выявлено рисков", len(findings))
+        col3.metric("Реализация без НДС, всего", f"{total_sales:,.0f}".replace(",", " "))
+        col4.metric("Выявлено рисков", len(findings))
     else:
         col3.metric("Реализация без НДС, всего", "—")
         col4.metric("Выявлено рисков", "—")
