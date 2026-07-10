@@ -772,7 +772,7 @@ def page_fno():
     for form_code, results in st.session_state.fno_results.items():
         st.subheader(f"Форма {form_code}")
         combined = pd.concat([r.dataframe for r in results], ignore_index=True)
-               base_cols = [
+        base_cols = [
             "fno_bin",
             "fno_view",
             "fno_reg_number",
