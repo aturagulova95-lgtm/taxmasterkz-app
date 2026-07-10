@@ -772,9 +772,36 @@ def page_fno():
     for form_code, results in st.session_state.fno_results.items():
         st.subheader(f"Форма {form_code}")
         combined = pd.concat([r.dataframe for r in results], ignore_index=True)
-        show_cols = [c for c in ["fno_bin", "fno_view", "fno_reg_number", "fno_status",
-                                  "fno_accept_date", "fno_submit_date", "year", "quarter"] if c in combined.columns]
-        st.dataframe(combined[show_cols], use_container_width=True, hide_index=True)
+               base_cols = [
+            "fno_bin",
+            "fno_view",
+            "fno_reg_number",
+            "fno_status",
+            "fno_accept_date",
+            "fno_submit_date",
+            "year",
+            "quarter",
+        ]
+
+        amount_cols = [
+            "income_declared",
+            "income_total",
+            "deductions",
+            "taxable_income",
+            "cit_calculated",
+            "vat_charged",
+            "vat_credit",
+            "vat_payable",
+            "vat_excess",
+        ]
+
+        show_cols = [c for c in base_cols + amount_cols if c in combined.columns]
+
+        st.dataframe(
+            combined[show_cols],
+            use_container_width=True,
+            hide_index=True
+        )
         n_reg = (combined["fno_view"] == "Очередная").sum() if "fno_view" in combined.columns else 0
         n_add = (combined["fno_view"] == "Дополнительная").sum() if "fno_view" in combined.columns else 0
         st.caption(f"Очередных: {n_reg}, дополнительных: {n_add}, всего: {len(combined)}")
