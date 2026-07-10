@@ -1,10 +1,11 @@
-streamlit>=1.32
-pandas>=2.0
-openpyxl>=3.1
-pdfplumber>=0.10
-plotly>=5.20
-python-docx>=1.1
-jinja2>=3.1
-duckdb>=0.10
-passlib[bcrypt]>=1.7
-# ВАЖНО: passlib==1.7.4 (�
+streamlit
+pandas
+openpyxl
+pdfplumber
+plotly
+python-docx
+jinja2
+duckdb
+passlib==1.7.4
+bcrypt==4.0.1
+python-dotenv
