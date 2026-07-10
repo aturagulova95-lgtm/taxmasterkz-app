@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Аналитическая справка — {{ ctx.taxpayer_name }}</title>
+<style>
+  body { font-family: "Segoe UI", Arial, sans-serif; color: #222; max-width: 980px; margin: 0 auto; padding: 24px; line-height: 1.5; }
+  h1 { font-size: 22px; border-bottom: 3px solid #2c5f8a; padding-bottom: 8px; }
+  h2 { font-size: 18px; color: #2c5f8a; margin-top: 32px; }
+  h3 { font-size: 15px; color: #444; margin-top: 20px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 20px; font-size: 13px; }
+  th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+  th { background: #eef3f7; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; color: #fff; font-size: 12px; }
+  .meta { color: #666; font-size: 13px; margin-bottom: 16px; }
+  .finding { border-left: 4px solid #ccc; padding: 8px 12px; margin: 10px 0; background: #fafafa; }
+  .finding.high { border-color: {{ risk_color['высокий'] }}; }
+  .finding.medium { border-color: {{ risk_color['средний'] }}; }
+  .finding.low { border-color: {{ risk_color['низкий'] }}; }
+  .summary-box { background: #f4f8fb; border: 1px solid #d5e3ee; padding: 16px; border-radius: 6px; }
+  .gap-box { background: #fff8e6; border: 1px solid #f0d68a; padding: 12px; border-radius: 6px; margin-top: 12px; }
+  .watermark-banner { background: #fdeaea; border: 2px solid #c03030; color: #a02020; font-weight: 700;
+                       padding: 10px 16px; border-radius: 6px; margin-bottom: 16px; text-align: center; }
+</style>
+</head>
+<body>
+
+{% if ctx.watermark_text %}
+<div class="watermark-banner">{{ ctx.watermark_text }}</div>
+{% endif %}
+
+<h1>Аналитическая справка по налогоплательщику {{ ctx.taxpayer_name }}, БИН/ИИН {{ ctx.taxpayer_bin }}, за период {{ ctx.years_label }}</h1>
+<div class="meta">Режим справки: {{ mode_title }}. Сформировано: {{ ctx.generated_at }}.</div>
+{% if ctx.watermark_text %}
+<div class="watermark-banner">{{ ctx.watermark_text }}</div>
+{% endif %}
+
+<h2>1. Краткий вывод</h2>
+<div class="summary-box">{{ ctx.summary_text }}</div>
+{% if ctx.data_gaps %}
+<div class="gap-box">Недостаточно данных для окончательного вывода по отдельным направлениям. Необходимо загрузить: {{ ctx.data_gaps|join(', ') }}.</div>
+{% endif %}
+
+<h2>2. Данные по налогоплательщику</h2>
+<table>
+<tr><th>БИН/ИИН</th><td>{{ ctx.taxpayer_bin }}</td></tr>
+<tr><th>Наименование</th><td>{{ ctx.taxpayer_name }}</td></tr>
+<tr><th>Дата регистрации</th><td>{{ ctx.profile.date_registration or 'н/д' }}</td></tr>
+<tr><th>ОКЭД</th><td>{{ ctx.profile.oked or 'н/д' }} — {{ ctx.profile.oked_name or '' }}</td></tr>
+<tr><th>Налоговый режим</th><td>{{ ctx.profile.tax_regime or 'н/д' }}</td></tr>
+<tr><th>Плательщик НДС</th><td>{{ 'Да' if ctx.profile.vat_payer == True else ('Нет' if ctx.profile.vat_payer == False else 'н/д') }}</td></tr>
+<tr><th>Дата постановки на НДС</th><td>{{ ctx.profile.vat_reg_date or 'н/д' }}</td></tr>
+<tr><th>Налоговая задолженность</th><td>{{ ctx.profile.tax_debt_total|amount }} тенге</td></tr>
+</table>
+
+{% if ctx.mode != 'court' and ctx.yearly_profile %}
+<h3>Численность, налоговые поступления и КНН по годам</h3>
+<table>
+<tr><th>Год</th><th>Численность</th><th>Налоговые поступления</th><th>КНН НП, %</th><th>КНН отрасли, %</th></tr>
+{% for y, d in ctx.yearly_profile.items()|sort %}
+<tr><td>{{ y }}</td><td>{{ d.avg_headcount }}</td><td>{{ d.tax_revenue|amount }}</td><td>{{ d.knn_taxpayer }}</td><td>{{ d.knn_industry }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2>3. Динамика по годам</h2>
+<table>
+<tr><th>Год</th><th>Реализация без НДС</th><th>НДС реализация</th><th>Приобретение без НДС</th><th>НДС приобретение</th><th>Разница</th><th>Налоговая нагрузка</th></tr>
+{% for d in ctx.dynamics %}
+<tr>
+  <td>{{ d.year }}</td><td>{{ d.sales_no_vat|amount }}</td><td>{{ d.sales_vat|amount }}</td>
+  <td>{{ d.purchases_no_vat|amount }}</td><td>{{ d.purchases_vat|amount }}</td>
+  <td>{{ d.diff_sales_purchases|amount }}</td><td>{{ (d.tax_burden_pct ~ '%') if d.tax_burden_pct else 'н/д' }}</td>
+</tr>
+{% endfor %}
+</table>
+
+{% if ctx.mode in ['inspector', 'management'] %}
+<h2>4. Покупатели по годам</h2>
+{% for y, items in ctx.buyers_by_year.items()|sort %}
+<h3>{{ y }} год</h3>
+<table>
+<tr><th>Покупатель</th><th>БИН</th><th>Кол-во ЭСФ</th><th>Сумма без НДС</th><th>Доля</th><th>Сектор</th></tr>
+{% for b in items[:10] %}
+<tr><td>{{ b.name or b.bin }}</td><td>{{ b.bin }}</td><td>{{ b.esf_count }}</td><td>{{ b.amount_no_vat|amount }}</td><td>{{ b.share_pct|pct }}</td><td>{{ b.sector }}</td></tr>
+{% endfor %}
+</table>
+{% endfor %}
+
+<h2>5. Поставщики по годам</h2>
+{% for y, items in ctx.suppliers_by_year.items()|sort %}
+<h3>{{ y }} год</h3>
+<table>
+<tr><th>Поставщик</th><th>БИН</th><th>Кол-во ЭСФ</th><th>Сумма без НДС</th><th>Доля</th><th>Концентрация</th></tr>
+{% for s in items[:10] %}
+<tr><td>{{ s.name or s.bin }}</td><td>{{ s.bin }}</td><td>{{ s.esf_count }}</td><td>{{ s.amount_no_vat|amount }}</td><td>{{ s.share_pct|pct }}</td><td>{{ s.concentration_flag }}</td></tr>
+{% endfor %}
+</table>
+{% endfor %}
+{% endif %}
+
+{% if ctx.mode == 'inspector' %}
+<h2>6. Сопоставление с ФНО</h2>
+<h3>НДС: ЭСФ vs ФНО 300.00</h3>
+<table>
+<tr><th>Период</th><th>НДС начисл. (ЭСФ)</th><th>НДС начисл. (ФНО)</th><th>Разница</th><th>НДС в зачёт (ЭСФ)</th><th>НДС в зачёт (ФНО)</th><th>Разница</th></tr>
+{% for v in ctx.vat_reconciliation %}
+<tr>
+  <td>{{ v.year }} Q{{ v.quarter }}</td><td>{{ v.esf_vat_charged|amount }}</td><td>{{ v.fno_vat_charged|amount if v.fno_vat_charged is not none else 'н/д' }}</td>
+  <td>{{ v.diff_vat_charged|amount if v.diff_vat_charged is not none else 'н/д' }}</td>
+  <td>{{ v.esf_vat_credit|amount }}</td><td>{{ v.fno_vat_credit|amount if v.fno_vat_credit is not none else 'н/д' }}</td>
+  <td>{{ v.diff_vat_credit|amount if v.diff_vat_credit is not none else 'н/д' }}</td>
+</tr>
+{% endfor %}
+</table>
+
+<h3>Доход: ЭСФ реализация vs ФНО 100.00</h3>
+<table>
+<tr><th>Год</th><th>Реализация (ЭСФ)</th><th>Доход (ФНО 100.00)</th><th>Разница</th></tr>
+{% for i in ctx.income_reconciliation %}
+<tr><td>{{ i.year }}</td><td>{{ i.esf_sales_amount|amount }}</td><td>{{ i.fno_income|amount if i.fno_income is not none else 'н/д' }}</td><td>{{ i.diff|amount if i.diff is not none else 'н/д' }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2>7. Камеральный контроль и риски</h2>
+{% for level, cls in [('высокий','high'), ('средний','medium'), ('низкий','low')] %}
+  {% set items = ctx.findings_by_level.get(level, []) %}
+  {% if items %}
+  <h3>Уровень риска: <span class="badge" style="background:{{ risk_color[level] }}">{{ level }}</span> ({{ items|length }})</h3>
+  {% for f in items %}
+  <div class="finding {{ cls }}">
+    <b>[{{ f.period }}] {{ f.risk_type }}</b><br>
+    {{ f.description }}<br>
+    <i>Что проверить:</i> {{ f.what_to_check }}<br>
+    <i>Возможные последствия:</i> {{ f.possible_consequence }}
+  </div>
+  {% endfor %}
+  {% endif %}
+{% endfor %}
+
+{% if ctx.mode in ['inspector', 'client'] %}
+<h2>8. Документы, которые нужно запросить</h2>
+{% if ctx.documents_to_request %}
+<table>
+<tr><th>Контрагент / период</th><th>Документ</th><th>Основание</th></tr>
+{% for d in ctx.documents_to_request %}
+<tr><td>{{ d.counterparty_or_period }}</td><td>{{ d.document }}</td><td>{{ d.reason }}</td></tr>
+{% endfor %}
+</table>
+{% else %}
+<p>Дополнительные документы по выявленным находкам не требуются.</p>
+{% endif %}
+{% endif %}
+
+<h2>9. Предварительный вывод</h2>
+<p>{{ ctx.conclusion_text }}</p>
+
+</body>
+</html>

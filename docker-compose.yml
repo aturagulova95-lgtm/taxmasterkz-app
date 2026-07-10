@@ -1,0 +1,20 @@
+services:
+  taxmasterkz:
+    build: .
+    container_name: taxmasterkz
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      # Все пользовательские данные (SQLite, DuckDB, загруженные файлы) — на
+      # хосте, вне контейнера. Обновление образа (docker compose up -d --build)
+      # не затронет данные пользователей.
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
