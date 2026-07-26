@@ -105,6 +105,7 @@ def _migrate_users_table(c):
     Ничего не удаляет и не переписывает — старые данные (пароли, роли, блокировки) целы."""
     cols = _table_columns(c, "users")
     new_columns = [
+        ("full_name", "TEXT"),
         ("plan", "TEXT"),
         ("access_start_date", "TEXT"),
         ("access_end_date", "TEXT"),
@@ -117,6 +118,16 @@ def _migrate_users_table(c):
         ("notes", "TEXT"),
         ("created_by", "TEXT"),
         ("updated_at", "TEXT"),
+        # Дублирующие колонки под альтернативные имена полей формы создания
+        # пользователя (tariff/expires_at/company/comment) — см. create_user().
+        # Хранятся ПАРАЛЛЕЛЬНО с plan/access_end_date/company_name/notes (не
+        # заменяют их), чтобы весь остальной код приложения (сайдбар, «Мой
+        # тариф», «Доступ», фильтры в Админ-панели, продление доступа и т.д.),
+        # который уже читает старые имена колонок, не сломался.
+        ("tariff", "TEXT"),
+        ("expires_at", "TEXT"),
+        ("company", "TEXT"),
+        ("comment", "TEXT"),
     ]
     for col_name, col_def in new_columns:
         if col_name not in cols:
@@ -248,17 +259,22 @@ def _create_user_locked(c, username: str, password: str, role: str, status: str,
                          analysis_used: int = 0, payment_status: str | None = None,
                          company_name: str | None = None, phone: str | None = None,
                          email: str | None = None, notes: str | None = None,
-                         created_by: str | None = None):
+                         created_by: str | None = None, full_name: str | None = None):
     password_hash = pwd_context.hash(password)
     now = datetime.utcnow().isoformat()
+    # tariff/expires_at/company/comment дублируют plan/access_end_date/company_name/notes
+    # в отдельных колонках той же строки (см. _migrate_users_table) — это то же самое
+    # значение под альтернативным именем поля, а не отдельный набор данных.
     c.execute(
         "INSERT INTO users (username, password_hash, role, status, expiry_date, created_at, "
         "plan, access_start_date, access_end_date, analysis_limit, analysis_used, payment_status, "
-        "company_name, phone, email, notes, created_by, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "company_name, phone, email, notes, created_by, updated_at, full_name, "
+        "tariff, expires_at, company, comment) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (username, password_hash, role, status, expiry_date, now,
          plan, access_start_date, access_end_date, analysis_limit, analysis_used, payment_status,
-         company_name, phone, email, notes, created_by, now),
+         company_name, phone, email, notes, created_by, now, full_name,
+         plan, access_end_date, company_name, notes),
     )
 
 
@@ -267,12 +283,34 @@ def _create_user_locked(c, username: str, password: str, role: str, status: str,
 # --------------------------------------------------------------------------
 
 def create_user(username: str, password: str, role: str = "user",
-                 status: str = "active", expiry_date: str | None = None,
-                 plan: str | None = None, access_start_date: str | None = None,
-                 access_end_date: str | None = None, analysis_limit: int | None = None,
-                 payment_status: str | None = None, company_name: str | None = None,
-                 phone: str | None = None, email: str | None = None, notes: str | None = None,
-                 created_by: str | None = None) -> tuple[bool, str]:
+                 full_name: str | None = None,
+                 tariff: str | None = None,
+                 expires_at: str | None = None,
+                 analysis_limit: int | None = None,
+                 company: str | None = None,
+                 phone: str | None = None,
+                 email: str | None = None,
+                 comment: str | None = None,
+                 status: str = "active",
+                 expiry_date: str | None = None,
+                 access_start_date: str | None = None,
+                 payment_status: str | None = None,
+                 created_by: str | None = None,
+                 # Старые имена параметров (plan/access_end_date/company_name/notes) —
+                 # оставлены как алиасы для обратной совместимости: если где-то в
+                 # коде остался вызов по старой схеме (например, при частичной
+                 # заливке файлов в GitHub, когда app.py и auth_db.py на секунду
+                 # рассинхронизированы), функция всё равно не упадёт с TypeError.
+                 # Если задано и старое, и новое имя — побеждает новое (tariff и т.д.).
+                 plan: str | None = None,
+                 access_end_date: str | None = None,
+                 company_name: str | None = None,
+                 notes: str | None = None) -> tuple[bool, str]:
+    plan = tariff if tariff is not None else plan
+    access_end_date = expires_at if expires_at is not None else access_end_date
+    company_name = company if company is not None else company_name
+    notes = comment if comment is not None else notes
+
     if role not in ROLES:
         return False, f"Недопустимая роль: {role}"
     if status not in STATUSES:
@@ -303,7 +341,7 @@ def create_user(username: str, password: str, role: str = "user",
                                  plan=plan, access_start_date=access_start_date, access_end_date=access_end_date,
                                  analysis_limit=analysis_limit, analysis_used=0, payment_status=payment_status,
                                  company_name=company_name, phone=phone, email=email, notes=notes,
-                                 created_by=created_by)
+                                 created_by=created_by, full_name=full_name)
         return True, "Пользователь создан"
     except sqlite3.IntegrityError:
         return False, f"Пользователь «{username}» уже существует"
