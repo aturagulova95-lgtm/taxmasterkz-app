@@ -1420,13 +1420,17 @@ def page_admin():
             pwd_val = new_password or ""
             end_date_val = new_end_date.isoformat() if new_end_date else None
             limit_val = int(new_limit_override) if new_limit_override else None
-            ok, msg = auth_db.create_user(
-                uname, pwd_val, role=new_role, plan=plan_val,
-                access_end_date=end_date_val, analysis_limit=limit_val,
-                full_name=(gen_full_name or "").strip() or None,
-                company_name=new_company or None, phone=new_phone or None,
-                email=new_email or None, notes=new_notes or None, created_by=user["username"],
-            )
+            try:
+                ok, msg = auth_db.create_user(
+                    uname, pwd_val, role=new_role, tariff=plan_val,
+                    expires_at=end_date_val, analysis_limit=limit_val,
+                    full_name=(gen_full_name or "").strip() or None,
+                    company=new_company or None, phone=new_phone or None,
+                    email=new_email or None, comment=new_notes or None, created_by=user["username"],
+                )
+            except Exception as e:
+                ok = False
+                msg = f"Не удалось создать пользователя: {e}"
             if ok:
                 created = auth_db.get_user(uname)
                 _audit(created["id"] if created else None, uname, "create_user",
