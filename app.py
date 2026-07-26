@@ -26,6 +26,11 @@ import datetime
 import io
 import json
 import os
+import random
+import re
+import secrets
+import string
+import tempfile
 
 import pandas as pd
 import plotly.express as px
@@ -48,48 +53,117 @@ from modules import (
 st.set_page_config(page_title="TaxMasterKZ — налоговый анализ НП", layout="wide", page_icon="📊")
 
 APP_NAME = "TaxMasterKZ"
-# Единственные места в коде, где нужно менять контакты/ссылки — эти три
-# переменные окружения (см. .env.example).
-THREADS_URL = os.environ.get("THREADS_URL", "https://www.threads.com/")
-WHATSAPP_URL = os.environ.get("WHATSAPP_URL", "https://wa.me/77000000000")
-SUPPORT_EMAIL = os.environ.get("SUPPORT_EMAIL", "")
+
+
+def _get_config(key: str, default: str = "") -> str:
+    """Читает настройку сначала из Streamlit Secrets (Streamlit Cloud -> Settings ->
+    Secrets), затем из переменной окружения (.env локально / Docker env_file), затем —
+    значение по умолчанию. Без файла .streamlit/secrets.toml обращение к st.secrets
+    бросает StreamlitSecretNotFoundError даже для .get() — это ожидаемо для локального
+    запуска без секретов, поэтому здесь оно перехватывается и код просто идёт дальше
+    к переменной окружения."""
+    try:
+        if key in st.secrets:
+            val = st.secrets[key]
+            if val:
+                return str(val)
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+
+# Единственные места в коде, где нужно менять контакты/ссылки/публичный адрес —
+# эти переменные (Streamlit Secrets в облаке или .env локально, см. .env.example).
+THREADS_URL = _get_config("THREADS_URL", "https://www.threads.com/@taxmasterkz")
+WHATSAPP_URL = _get_config("WHATSAPP_URL", "https://wa.me/77000000000")
+SUPPORT_EMAIL = _get_config("SUPPORT_EMAIL", "")
+APP_PUBLIC_URL = _get_config("APP_PUBLIC_URL", "http://localhost:8501")
 INSTRUCTIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ИНСТРУКЦИЯ_ПОЛЬЗОВАТЕЛЯ.md")
 
 auth_db.init_db()
 
+_TRANSLIT_MAP = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def _translit(word: str) -> str:
+    return "".join(_TRANSLIT_MAP.get(ch, ch) for ch in word.lower())
+
+
+def generate_username_from_fullname(full_name: str) -> str:
+    """Логин вида 'имя.фамилия' транслитерацией с кириллицы (см. ТЗ: 'Жанболат
+    Берикбаев' -> 'zhanbolat.berikbayev'). Если ФИО не задано, транслитерация
+    даёт пустую/слишком короткую строку (например, только цифры/спецсимволы) —
+    безопасный запасной вариант user_ГГГГММДД_ЧЧММ, чтобы логин всегда был
+    валидным без ручного вмешательства администратора."""
+    parts = [p for p in re.split(r"\s+", (full_name or "").strip()) if p]
+    if len(parts) >= 2:
+        login = ".".join(_translit(p) for p in parts[:2])
+        login = re.sub(r"[^a-z0-9.]", "", login)
+        login = re.sub(r"\.+", ".", login).strip(".")
+        if len(login) >= 3:
+            candidate = login
+            suffix = 2
+            while auth_db.get_user(candidate):
+                candidate = f"{login}{suffix}"
+                suffix += 1
+            return candidate
+    return f"user_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
+
+
+def generate_strong_password(length: int = 14) -> str:
+    """Сложный пароль: минимум 12 символов, обязательно есть заглавная, строчная,
+    цифра и спецсимвол (см. ТЗ). Показывается администратору только в момент
+    создания пользователя — в базе хранится только bcrypt-хэш (см. auth_db.py)."""
+    upper, lower, digits, special = string.ascii_uppercase, string.ascii_lowercase, string.digits, "!@#$%^&*-_+="
+    required = [secrets.choice(upper), secrets.choice(lower), secrets.choice(digits), secrets.choice(special)]
+    rest = [secrets.choice(upper + lower + digits + special) for _ in range(max(length - len(required), 0))]
+    chars = required + rest
+    random.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
 
 def threads_badge_html(label: str = "TaxMasterKZ в Threads", compact: bool = False) -> str:
-    """Аккуратный значок-ссылка на Threads (круглый значок '@' + подпись), кликабельный."""
+    """Аккуратный значок-ссылка на Threads (круглый значок '@' + подпись), кликабельный.
+
+    Вся HTML-разметка — одной строкой, без переносов и отступов: Streamlit/CommonMark
+    трактует строку с отступом в 4+ пробела, идущую после пустой строки, как блок кода,
+    из-за чего значок раньше отображался как текст HTML вместо кликабельной кнопки
+    (см. ТЗ v4 п.8). Раздельные фрагменты в contact_badges_html() тоже нельзя склеивать
+    через строки, содержащие только пробелы — такая "пустая" строка обрывает HTML-блок.
+    """
     pad = "4px 10px" if compact else "6px 14px"
     size = 20 if compact else 26
     font = "12px" if compact else "13px"
-    return f'''
-    <a href="{THREADS_URL}" target="_blank" rel="noopener noreferrer"
-       style="text-decoration:none;">
-      <div style="display:inline-flex;align-items:center;gap:8px;padding:{pad};
-                  border:1px solid #3a3a3a;border-radius:999px;background:#000;
-                  color:#fff;font-size:{font};font-family:inherit;">
-        <span style="width:{size}px;height:{size}px;min-width:{size}px;border-radius:50%;
-                     background:#fff;color:#000;display:inline-flex;align-items:center;
-                     justify-content:center;font-weight:800;">@</span>
-        <span>{label}</span>
-      </div>
-    </a>
-    '''
+    return (
+        f'<a href="{THREADS_URL}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">'
+        f'<div style="display:inline-flex;align-items:center;gap:8px;padding:{pad};'
+        f'border:1px solid #3a3a3a;border-radius:999px;background:#000;color:#fff;'
+        f'font-size:{font};font-family:inherit;">'
+        f'<span style="width:{size}px;height:{size}px;min-width:{size}px;border-radius:50%;'
+        f'background:#fff;color:#000;display:inline-flex;align-items:center;'
+        f'justify-content:center;font-weight:800;">@</span>'
+        f'<span>{label}</span>'
+        f'</div></a>'
+    )
 
 
 def whatsapp_badge_html(label: str = "Написать в WhatsApp", compact: bool = False) -> str:
     pad = "4px 10px" if compact else "6px 14px"
     font = "12px" if compact else "13px"
-    return f'''
-    <a href="{WHATSAPP_URL}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">
-      <div style="display:inline-flex;align-items:center;gap:8px;padding:{pad};
-                  border:1px solid #1fa855;border-radius:999px;background:#25D366;
-                  color:#fff;font-size:{font};font-family:inherit;font-weight:600;">
-        <span>💬</span><span>{label}</span>
-      </div>
-    </a>
-    '''
+    return (
+        f'<a href="{WHATSAPP_URL}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">'
+        f'<div style="display:inline-flex;align-items:center;gap:8px;padding:{pad};'
+        f'border:1px solid #1fa855;border-radius:999px;background:#25D366;color:#fff;'
+        f'font-size:{font};font-family:inherit;font-weight:600;">'
+        f'<span>💬</span><span>{label}</span>'
+        f'</div></a>'
+    )
 
 
 def contact_badges_html() -> str:
@@ -119,6 +193,18 @@ def go_to(page_name: str):
 
 def _current_user() -> dict | None:
     return st.session_state.get("auth_user")
+
+
+def _df_records(df) -> list:
+    """Безопасно превращает DataFrame (или None/что угодно) в список записей."""
+    if df is None:
+        return []
+    try:
+        if df.empty:
+            return []
+        return df.to_dict("records")
+    except AttributeError:
+        return []
 
 
 def _get_client_ip() -> str | None:
@@ -260,8 +346,15 @@ def process_taxpayer_file(uploaded_file):
         if name.lower().endswith(".pdf"):
             profile = taxpayer_parser.parse_sur_pdf(data, name)
         else:
-            tables = file_loader.load_any(data, name)
-            profile = taxpayer_parser.parse_taxpayer_excel(tables, name)
+            # сначала пробуем формат "поле / значение" по сырым строкам книги
+            # (см. taxpayer_parser.parse_taxpayer_card_2col_raw) — обычная
+            # автозагрузка через file_loader режет такой вертикальный список
+            # как будто у него есть строка-заголовок, и портит первую пару.
+            # Если это не тот формат — используем обычный табличный парсер.
+            profile = taxpayer_parser.parse_taxpayer_card_2col_raw(data, name)
+            if profile is None:
+                tables = file_loader.load_any(data, name)
+                profile = taxpayer_parser.parse_taxpayer_excel(tables, name)
         st.session_state.taxpayer_profile = profile
         card = {
             "filename": name, "category": "Карточка НП", "status": "ок" if profile.bin_iin else "требует проверки",
@@ -313,8 +406,11 @@ def process_fno_file(uploaded_file):
     name = uploaded_file.name
     data = uploaded_file.getvalue()
     try:
-        tables = file_loader.load_excel(data, name) if name.lower().endswith((".xlsx", ".xls")) else file_loader.load_csv(data, name)
-        results = fno_parser.parse_fno_file(tables, name)
+        if name.lower().endswith(".pdf"):
+            results = fno_parser.parse_fno_pdf(data, name)
+        else:
+            tables = file_loader.load_excel(data, name) if name.lower().endswith((".xlsx", ".xls")) else file_loader.load_csv(data, name)
+            results = fno_parser.parse_fno_file(tables, name)
         if not results:
             st.session_state.files_registry.append({
                 "filename": name, "category": "ФНО", "status": "не распознано как реестр ФНО",
@@ -464,38 +560,18 @@ def page_home():
     c = st.session_state.computed
 
     col1, col2, col3, col4 = st.columns(4)
-
     col1.metric("Загружено файлов", len(st.session_state.files_registry))
-
-    years = sorted({
-        y
-        for card in st.session_state.files_registry
-        for y in (card.get("years") or [])
-    })
+    years = sorted({y for card in st.session_state.files_registry for y in (card.get("years") or [])})
     col2.metric("Годы анализа", f"{years[0]}–{years[-1]}" if years else "—")
-
-    if c is not None and isinstance(c, dict):
+    if c is not None:
         dynamics = c.get("dynamics")
         findings = c.get("findings", [])
-
-        if (
-            dynamics is not None
-            and hasattr(dynamics, "columns")
-            and "sales_no_vat" in dynamics.columns
-            and not dynamics.empty
-        ):
-            total_sales = sum(
-                d.get("sales_no_vat", 0)
-                for d in dynamics.to_dict("records")
-            )
+        if dynamics is not None and not dynamics.empty and "sales_no_vat" in dynamics.columns:
+            total_sales = dynamics["sales_no_vat"].sum()
+            col3.metric("Реализация без НДС, всего", f"{total_sales:,.0f}".replace(",", " "))
         else:
-            total_sales = 0
-
-        col3.metric(
-            "Реализация без НДС, всего",
-            f"{total_sales:,.0f}".replace(",", " ")
-        )
-        col4.metric("Выявлено рисков", len(findings))
+            col3.metric("Реализация без НДС, всего", "—")
+        col4.metric("Выявлено рисков", len(findings) if findings is not None else "—")
     else:
         col3.metric("Реализация без НДС, всего", "—")
         col4.metric("Выявлено рисков", "—")
@@ -533,12 +609,12 @@ def page_home():
 
 def page_upload():
     st.title("Загрузка данных")
-    st.caption("Перетащите файлы в соответствующий блок. Приложение само определит тип, год и направление (приобретение/реализация); при ошибке распознавания можно скорректировать вручную.")
+    st.caption("Перетащите файлы в соответствующий блок. Приложение само определяет тип, год и направление (приобретение/реализация). Если нужно — скорректируйте вручную.")
 
     tabs = st.tabs(CATEGORIES)
 
     with tabs[0]:
-        st.write("PDF или Excel из КГД/SUR со сведениями о налогоплательщике.")
+        st.write("PDF или Excel из КГД/СУР со сведениями о налогоплательщике.")
         files = st.file_uploader("Карточка НП", type=["pdf", "xlsx", "xls"], accept_multiple_files=True, key="up_taxpayer")
         if files:
             for f in files:
@@ -549,8 +625,8 @@ def page_upload():
 
     with tabs[1]:
         st.caption("💡 Загрузите налоговые формы для сопоставления с ЭСФ.")
-        st.write("Реестры ФНО 100.00 / 200.00 / 200.01 / 300.00 и др. (выгрузки кабинета налогоплательщика).")
-        files = st.file_uploader("ФНО", type=["xlsx", "xls", "csv"], accept_multiple_files=True, key="up_fno")
+        st.write("Реестры ФНО 100.00 / 200.00 / 200.01 / 300.00 и др. (PDF или выгрузки кабинета налогоплательщика).")
+        files = st.file_uploader("ФНО", type=["pdf", "xlsx", "xls", "csv"], accept_multiple_files=True, key="up_fno")
         if files:
             for f in files:
                 if f.name not in [c["filename"] for c in st.session_state.files_registry]:
@@ -653,22 +729,27 @@ def page_dashboard():
         st.warning("Сначала загрузите данные и нажмите «Собрать базу и пересчитать аналитику» на странице «Загрузка данных».")
         return
 
-    dyn = c["dynamics"]
-    if dyn.empty:
+    dyn = c.get("dynamics")
+    if dyn is None or dyn.empty:
         st.info("Недостаточно данных для построения дашборда. Необходимо загрузить: ЭСФ по приобретению и/или реализации.")
         return
 
+    esf_sales = c.get("esf_sales")
+    esf_purchases = c.get("esf_purchases")
+    buyers = c.get("buyers")
+    suppliers = c.get("suppliers")
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Реализация без НДС", f"{dyn['sales_no_vat'].sum():,.0f}".replace(",", " "))
-    col2.metric("Приобретение без НДС", f"{dyn['purchases_no_vat'].sum():,.0f}".replace(",", " "))
-    col3.metric("НДС начисленный", f"{dyn['sales_vat'].sum():,.0f}".replace(",", " "))
-    col4.metric("НДС в зачёт", f"{dyn['purchases_vat'].sum():,.0f}".replace(",", " "))
+    col1.metric("Реализация без НДС", f"{dyn.get('sales_no_vat', pd.Series(dtype=float)).sum():,.0f}".replace(",", " "))
+    col2.metric("Приобретение без НДС", f"{dyn.get('purchases_no_vat', pd.Series(dtype=float)).sum():,.0f}".replace(",", " "))
+    col3.metric("НДС начисленный", f"{dyn.get('sales_vat', pd.Series(dtype=float)).sum():,.0f}".replace(",", " "))
+    col4.metric("НДС в зачёт", f"{dyn.get('purchases_vat', pd.Series(dtype=float)).sum():,.0f}".replace(",", " "))
 
     col5, col6, col7 = st.columns(3)
-    col5.metric("Кол-во ЭСФ реализации", int(c["esf_sales"]["esf_number"].nunique()) if not c["esf_sales"].empty else 0)
-    col6.metric("Кол-во ЭСФ приобретения", int(c["esf_purchases"]["esf_number"].nunique()) if not c["esf_purchases"].empty else 0)
-    n_buyers = c["buyers"]["bin"].nunique() if not c["buyers"].empty else 0
-    n_suppliers = c["suppliers"]["bin"].nunique() if not c["suppliers"].empty else 0
+    col5.metric("Кол-во ЭСФ реализации", int(esf_sales["esf_number"].nunique()) if esf_sales is not None and not esf_sales.empty else 0)
+    col6.metric("Кол-во ЭСФ приобретения", int(esf_purchases["esf_number"].nunique()) if esf_purchases is not None and not esf_purchases.empty else 0)
+    n_buyers = buyers["bin"].nunique() if buyers is not None and not buyers.empty else 0
+    n_suppliers = suppliers["bin"].nunique() if suppliers is not None and not suppliers.empty else 0
     col7.metric("Покупателей / Поставщиков", f"{n_buyers} / {n_suppliers}")
 
     st.divider()
@@ -697,8 +778,8 @@ def _counterparty_page(role: str):
     if c is None:
         st.warning("Сначала загрузите данные и пересчитайте аналитику.")
         return
-    df = c["buyers"] if role == "buyers" else c["suppliers"]
-    if df.empty:
+    df = c.get("buyers") if role == "buyers" else c.get("suppliers")
+    if df is None or df.empty:
         st.info(f"Недостаточно данных. Необходимо загрузить ЭСФ по {'реализации' if role=='buyers' else 'приобретению'}.")
         return
 
@@ -767,51 +848,83 @@ def page_suppliers():
 def page_fno():
     st.title("ФНО (налоговая отчётность)")
     if not st.session_state.fno_results:
-        st.info("Файлы ФНО ещё не загружены.")
+        st.info("Файлы ФНО ещё не загружены. Загрузите реестры 100.00 / 200.00 / 200.01 / 300.00 в разделе «Загрузка данных».")
         return
+
+    base_cols = [
+        "fno_bin",
+        "fno_code",
+        "fno_view",
+        "fno_reg_number",
+        "fno_status",
+        "fno_accept_date",
+        "fno_submit_date",
+        "year",
+        "quarter",
+    ]
+    amount_cols = [
+        "income_declared",
+        "income_total",
+        "deductions",
+        "taxable_income",
+        "cit_calculated",
+        "vat_charged",
+        "vat_credit",
+        "vat_payable",
+        "vat_excess",
+    ]
+    amount_labels = {
+        "income_declared": "Совокупный годовой доход",
+        "income_total": "Доход с учётом корректировок",
+        "deductions": "Вычеты",
+        "taxable_income": "Налогооблагаемый доход",
+        "cit_calculated": "КПН исчисленный",
+        "vat_charged": "НДС начисленный",
+        "vat_credit": "НДС в зачёт",
+        "vat_payable": "НДС к уплате",
+        "vat_excess": "Превышение НДС в зачёт",
+    }
+
     for form_code, results in st.session_state.fno_results.items():
         st.subheader(f"Форма {form_code}")
+        if not results:
+            st.info("Нет распознанных строк по этой форме.")
+            continue
+
         combined = pd.concat([r.dataframe for r in results], ignore_index=True)
-        base_cols = [
-            "fno_bin",
-            "fno_view",
-            "fno_reg_number",
-            "fno_status",
-            "fno_accept_date",
-            "fno_submit_date",
-            "year",
-            "quarter",
-        ]
-
-        amount_cols = [
-            "income_declared",
-            "income_total",
-            "deductions",
-            "taxable_income",
-            "cit_calculated",
-            "vat_charged",
-            "vat_credit",
-            "vat_payable",
-            "vat_excess",
-        ]
-
         show_cols = [c for c in base_cols + amount_cols if c in combined.columns]
+        st.dataframe(combined[show_cols], use_container_width=True, hide_index=True)
 
-        st.dataframe(
-            combined[show_cols],
-            use_container_width=True,
-            hide_index=True
-        )
-        n_reg = (combined["fno_view"] == "Очередная").sum() if "fno_view" in combined.columns else 0
-        n_add = (combined["fno_view"] == "Дополнительная").sum() if "fno_view" in combined.columns else 0
+        n_reg = int((combined.get("fno_view") == "Очередная").sum()) if "fno_view" in combined.columns else 0
+        n_add = int((combined.get("fno_view") == "Дополнительная").sum()) if "fno_view" in combined.columns else 0
         st.caption(f"Очередных: {n_reg}, дополнительных: {n_add}, всего: {len(combined)}")
+
+        found_sums, missing_sums = [], []
+        for col in amount_cols:
+            label = amount_labels.get(col, col)
+            if col in combined.columns and combined[col].notna().any():
+                total = combined[col].dropna().sum()
+                found_sums.append(f"{label}: {total:,.0f} ₸".replace(",", " "))
+            else:
+                missing_sums.append(label)
+        if found_sums:
+            st.success("Найдены суммы: " + "; ".join(found_sums))
+        if missing_sums:
+            st.info(
+                "Не удалось определить суммы по показателям: " + ", ".join(missing_sums) +
+                ". Проверьте карту полей в разделе «Настройки»."
+            )
+
         for r in results:
             for w in r.warnings:
                 st.warning(f"{r.form_code}: {w}")
+
     st.divider()
     st.caption(
-        "Суммовые показатели деклараций (доход, НДС начисленный/в зачёт, зарплатные налоги) "
-        "становятся доступны после настройки карты полей в разделе «Настройки»."
+        "Суммовые показатели декларации (доход, вычеты, КПН, НДС начисленный/в зачёт) читаются по "
+        "карте полей config/fno_field_map.json. Если по какому-то показателю сумма не появилась — "
+        "уточните карту полей в разделе «Настройки»: КГД не публикует единую расшифровку кодов, и в "
+        "разных версиях/периодах формы код может отличаться."
     )
 
 
@@ -823,21 +936,35 @@ def page_cameral_control():
         st.warning("Сначала загрузите данные и пересчитайте аналитику.")
         return
 
+    fno_field_warning = (
+        "ФНО загружена, но суммовые поля не распознаны. Камеральная сверка по этой форме ограничена. "
+        "Для Excel-выгрузки проверьте карту полей в разделе «Настройки»; для PDF — качество текста в файле."
+    )
+
     st.subheader("Сверка НДС: ЭСФ vs ФНО 300.00")
-    if not c["vat_rec"].empty:
-        st.dataframe(c["vat_rec"], use_container_width=True, hide_index=True)
+    vat_rec = c.get("vat_rec")
+    if vat_rec is not None and not vat_rec.empty:
+        st.dataframe(vat_rec, use_container_width=True, hide_index=True)
+    elif st.session_state.fno_results.get("300.00"):
+        st.warning(fno_field_warning)
     else:
-        st.info("Недостаточно данных для сверки по НДС. Необходимо загрузить: ЭСФ реализация/приобретение.")
+        st.info("Недостаточно данных для сверки по НДС. Необходимо загрузить: ЭСФ реализация/приобретение и ФНО 300.00.")
 
     st.subheader("Сверка дохода: ЭСФ реализация vs ФНО 100.00")
-    if not c["income_rec"].empty:
-        st.dataframe(c["income_rec"], use_container_width=True, hide_index=True)
+    income_rec = c.get("income_rec")
+    if income_rec is not None and not income_rec.empty:
+        st.dataframe(income_rec, use_container_width=True, hide_index=True)
+    elif st.session_state.fno_results.get("100.00"):
+        st.warning(fno_field_warning)
     else:
-        st.info("Недостаточно данных для сверки дохода. Необходимо загрузить: ЭСФ реализация.")
+        st.info("Недостаточно данных для сверки дохода. Необходимо загрузить: ЭСФ реализация и ФНО 100.00.")
 
     st.subheader("Проверка зарплатных налогов (численность vs ФНО 200.00)")
-    if not c["payroll"].empty:
-        st.dataframe(c["payroll"], use_container_width=True, hide_index=True)
+    payroll = c.get("payroll")
+    if payroll is not None and not payroll.empty:
+        st.dataframe(payroll, use_container_width=True, hide_index=True)
+    elif st.session_state.fno_results.get("200.00") or st.session_state.fno_results.get("200.01"):
+        st.warning(fno_field_warning)
     else:
         st.info("Недостаточно данных. Необходимо загрузить: карточку НП и ФНО 200.00/200.01.")
 
@@ -846,21 +973,23 @@ def page_cameral_control():
     st.caption("💡 Риск не является доказанным нарушением. Он показывает участок, который нужно проверить.")
     level_filter = st.multiselect("Уровень риска", ["высокий", "средний", "низкий"],
                                    default=["высокий", "средний", "низкий"])
-    findings = c["findings"]
+    findings = c.get("findings", []) or []
     for i, f in enumerate(findings):
-        if f["level"] not in level_filter:
+        if f.get("level") not in level_filter:
             continue
-        color = {"высокий": "🔴", "средний": "🟡", "низкий": "🟢"}.get(f["level"], "⚪")
+        color = {"высокий": "🔴", "средний": "🟡", "низкий": "🟢"}.get(f.get("level"), "⚪")
         resolved_mark = " ✅ документы получены" if f.get("resolved") else ""
-        with st.expander(f"{color} [{f['period']}] {f['risk_type']}{resolved_mark}"):
-            st.write(f["description"])
-            st.markdown(f"**Что проверить:** {f['what_to_check']}")
-            st.markdown(f"**Возможные последствия:** {f['possible_consequence']}")
-            st.caption(f"Источник: {f['source']} | Сумма: {f['amount']}")
+        with st.expander(f"{color} [{f.get('period', '—')}] {f.get('risk_type', 'риск')}{resolved_mark}"):
+            st.write(f.get("description", ""))
+            st.markdown(f"**Что проверить:** {f.get('what_to_check', '—')}")
+            st.markdown(f"**Возможные последствия:** {f.get('possible_consequence', '—')}")
+            st.caption(f"Источник: {f.get('source', '—')} | Сумма: {f.get('amount', '—')}")
             colx, coly, colz = st.columns(3)
             override = st.session_state.risk_overrides.get(i, {})
-            new_level = colx.selectbox("Изменить уровень риска", ["высокий", "средний", "низкий"],
-                                        index=["высокий", "средний", "низкий"].index(f["level"]), key=f"lvl_{i}")
+            _levels = ["высокий", "средний", "низкий"]
+            _cur_level = f.get("level") if f.get("level") in _levels else "средний"
+            new_level = colx.selectbox("Изменить уровень риска", _levels,
+                                        index=_levels.index(_cur_level), key=f"lvl_{i}")
             resolved = coly.checkbox("Документы получены", value=override.get("resolved", False), key=f"res_{i}")
             comment = colz.text_input("Комментарий проверяющего", value=override.get("comment", ""), key=f"cmt_{i}")
             if st.button("Сохранить", key=f"save_{i}"):
@@ -897,16 +1026,23 @@ def page_report():
     if user and auth_db.needs_watermark(user):
         st.info("На тарифе DEMO справка формируется с водяным знаком «Демо-версия TaxMasterKZ».")
 
-    all_years = sorted(set(c["dynamics"]["year"].tolist())) if not c["dynamics"].empty else []
+    dynamics0 = c.get("dynamics")
+    all_years = sorted(set(dynamics0["year"].tolist())) if dynamics0 is not None and not dynamics0.empty else []
     col1, col2 = st.columns(2)
     years_sel = col1.multiselect("Период (годы)", all_years, default=all_years)
     mode = col2.selectbox("Стиль справки", list(report_generator.MODE_TITLES.keys()),
                            format_func=lambda k: report_generator.MODE_TITLES[k])
 
     if st.button("📝 Сформировать справку", type="primary"):
-        dyn = c["dynamics"][c["dynamics"]["year"].isin(years_sel)] if years_sel else c["dynamics"]
-        buyers = c["buyers"][c["buyers"]["year"].isin(years_sel)] if years_sel and not c["buyers"].empty else c["buyers"]
-        suppliers = c["suppliers"][c["suppliers"]["year"].isin(years_sel)] if years_sel and not c["suppliers"].empty else c["suppliers"]
+        dyn0 = c.get("dynamics")
+        buyers0 = c.get("buyers")
+        suppliers0 = c.get("suppliers")
+        esf_purchases0 = c.get("esf_purchases")
+        esf_sales0 = c.get("esf_sales")
+
+        dyn = dyn0[dyn0["year"].isin(years_sel)] if years_sel and dyn0 is not None and not dyn0.empty else (dyn0 if dyn0 is not None else pd.DataFrame())
+        buyers = buyers0[buyers0["year"].isin(years_sel)] if years_sel and buyers0 is not None and not buyers0.empty else (buyers0 if buyers0 is not None else pd.DataFrame())
+        suppliers = suppliers0[suppliers0["year"].isin(years_sel)] if years_sel and suppliers0 is not None and not suppliers0.empty else (suppliers0 if suppliers0 is not None else pd.DataFrame())
 
         buyers_by_year = {int(y): g.to_dict("records") for y, g in buyers.groupby("year")} if not buyers.empty else {}
         suppliers_by_year = {int(y): g.to_dict("records") for y, g in suppliers.groupby("year")} if not suppliers.empty else {}
@@ -916,16 +1052,17 @@ def page_report():
             has_fno100=bool(st.session_state.fno_results.get("100.00")),
             has_fno200=bool(st.session_state.fno_results.get("200.00") or st.session_state.fno_results.get("200.01")),
             has_fno300=bool(st.session_state.fno_results.get("300.00")),
-            has_esf_purchases=not c["esf_purchases"].empty,
-            has_esf_sales=not c["esf_sales"].empty,
+            has_esf_purchases=esf_purchases0 is not None and not esf_purchases0.empty,
+            has_esf_sales=esf_sales0 is not None and not esf_sales0.empty,
         )
         total_sales = dyn["sales_no_vat"].sum() if not dyn.empty else 0
         total_purchases = dyn["purchases_no_vat"].sum() if not dyn.empty else 0
+        findings_by_level = c.get("findings_by_level", {})
         summary = report_generator.build_summary_text(
             profile.name, profile.bin_iin, profile.tax_regime, profile.vat_payer, profile.oked_name,
-            total_sales, total_purchases, c["findings_by_level"], data_gaps,
+            total_sales, total_purchases, findings_by_level, data_gaps,
         )
-        conclusion = report_generator.build_conclusion_text(c["findings_by_level"], data_gaps)
+        conclusion = report_generator.build_conclusion_text(findings_by_level, data_gaps)
 
         years_label = f"{years_sel[0]}-{years_sel[-1]}" if years_sel else "весь период"
         watermark_text = (
@@ -937,9 +1074,9 @@ def page_report():
             years_label=years_label, mode=mode, generated_at=str(datetime.date.today()),
             profile=profile.fields, yearly_profile=profile.yearly,
             dynamics=dyn.to_dict("records"), buyers_by_year=buyers_by_year, suppliers_by_year=suppliers_by_year,
-            vat_reconciliation=c["vat_rec"].to_dict("records"), income_reconciliation=c["income_rec"].to_dict("records"),
-            payroll_check=c["payroll"].to_dict("records"), findings_by_level=c["findings_by_level"],
-            documents_to_request=c["documents"], summary_text=summary, conclusion_text=conclusion, data_gaps=data_gaps,
+            vat_reconciliation=_df_records(c.get("vat_rec")), income_reconciliation=_df_records(c.get("income_rec")),
+            payroll_check=_df_records(c.get("payroll")), findings_by_level=findings_by_level,
+            documents_to_request=c.get("documents", []), summary_text=summary, conclusion_text=conclusion, data_gaps=data_gaps,
             watermark_text=watermark_text,
         )
         html = report_generator.render_html(ctx)
@@ -955,7 +1092,12 @@ def page_report():
 
         ok_word, msg_word = auth_db.check_feature(user, "word") if user else (True, "OK")
         if ok_word:
-            docx_path = "/tmp/_analytical_report.docx"
+            # Абсолютный путь "/tmp/..." на Windows резолвится в "<текущий_диск>:\tmp\..."
+            # (например, D:\tmp\...), а не в реальный временный каталог — так как этой
+            # папки обычно нет, локальный запуск на Windows падал с ошибкой сохранения
+            # Word-файла. tempfile.gettempdir() даёт корректный временный каталог и на
+            # Windows, и на Linux (в т.ч. на Streamlit Cloud).
+            docx_path = os.path.join(tempfile.gettempdir(), "_analytical_report.docx")
             try:
                 report_generator.render_docx(ctx, docx_path)
                 with open(docx_path, "rb") as f:
@@ -985,7 +1127,9 @@ def page_report():
         elif excel_mode == "basic":
             st.caption("На тарифе START доступны только основные своды (динамика, покупатели, поставщики). "
                        "Полный свод с рисками и сверкой ФНО — на PRO/TEAM/ENTERPRISE.")
-            xlsx_bytes = export_utils.export_basic_workbook(c["dynamics"], c["buyers"], c["suppliers"])
+            xlsx_bytes = export_utils.export_basic_workbook(
+                c.get("dynamics", pd.DataFrame()), c.get("buyers", pd.DataFrame()), c.get("suppliers", pd.DataFrame())
+            )
             if st.download_button("📥 Скачать Excel-приложения к справке (основные своды)", data=xlsx_bytes,
                                 file_name=f"Приложения_{ctx.taxpayer_bin}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"):
@@ -993,7 +1137,8 @@ def page_report():
                     _audit(user["id"], user["username"], "download_report", "Excel basic")
         else:
             xlsx_bytes = export_utils.export_full_workbook(
-                c["dynamics"], c["buyers"], c["suppliers"], c["findings"], c["vat_rec"], c["income_rec"]
+                c.get("dynamics", pd.DataFrame()), c.get("buyers", pd.DataFrame()), c.get("suppliers", pd.DataFrame()),
+                c.get("findings", []), c.get("vat_rec", pd.DataFrame()), c.get("income_rec", pd.DataFrame())
             )
             if st.download_button("📥 Скачать Excel-приложения к справке", data=xlsx_bytes,
                                 file_name=f"Приложения_{ctx.taxpayer_bin}.xlsx",
@@ -1164,12 +1309,12 @@ def page_plans():
 
 def render_login_page():
     st.title(f"📊 {APP_NAME}")
+    st.subheader("Налоговый анализ и камеральная сверка НП")
     st.markdown(
-        "**TaxMasterKZ** — помощник для камерального анализа налогоплательщиков. "
-        "Загрузите ЭСФ, ФНО и сведения по НП, чтобы получить свод по покупателям, "
-        "поставщикам, расхождениям и налоговым рискам."
+        "Загрузите ЭСФ, ФНО, карточку НП и получите свод по покупателям, поставщикам, "
+        "расхождениям и налоговым рискам."
     )
-    st.markdown(contact_badges_html(), unsafe_allow_html=True)
+
     st.divider()
     st.subheader("Вход в систему")
     with st.form("login_form"):
@@ -1184,10 +1329,30 @@ def render_login_page():
             st.session_state["auth_user"] = user
             _audit(user["id"], user["username"], "login", "")
             st.rerun()
+
+    st.markdown(contact_badges_html(), unsafe_allow_html=True)
     st.caption(
-        "Доступ предоставляется администратором TaxMasterKZ. Если у вас нет логина и пароля — "
-        "обратитесь по контактам выше (WhatsApp или Threads)."
+        "Нет доступа? Напишите нам в WhatsApp или Threads — администратор создаст логин и пароль."
     )
+
+    st.divider()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**Что умеет TaxMasterKZ:**")
+        st.markdown(
+            "- анализ ЭСФ реализации и приобретения;\n"
+            "- сверка с ФНО 100.00 и 300.00;\n"
+            "- выявление расхождений;\n"
+            "- анализ покупателей и поставщиков;\n"
+            "- формирование аналитической справки."
+        )
+    with col_b:
+        st.markdown("**Как получить доступ:**")
+        st.markdown(
+            '1. Нажмите "Написать в WhatsApp".\n'
+            "2. Укажите ФИО и желаемый тариф.\n"
+            "3. Администратор выдаст логин и пароль."
+        )
 
 
 def page_admin():
@@ -1219,25 +1384,46 @@ def page_admin():
         "управляйте лимитом анализов и статусом оплаты."
     )
 
-    with st.expander("➕ Создать пользователя", expanded=False):
+    with st.expander("➕ Создать пользователя (выдать доступ)", expanded=False):
+        st.caption(
+            "Впишите ФИО и нажмите «Сгенерировать логин и пароль» — поля ниже заполнятся "
+            "автоматически (логин латиницей вида имя.фамилия, надёжный пароль). Значения "
+            "можно поправить вручную перед созданием."
+        )
+        gcol1, gcol2 = st.columns([3, 1])
+        gen_full_name = gcol1.text_input("ФИО пользователя", key="admin_gen_fullname")
+        if gcol2.button("🎲 Сгенерировать логин и пароль", use_container_width=True):
+            st.session_state["_gen_username"] = generate_username_from_fullname(gen_full_name)
+            st.session_state["_gen_password"] = generate_strong_password()
+
         with st.form("create_user_form"):
             c1, c2, c3 = st.columns(3)
-            new_username = c1.text_input("Логин")
-            new_password = c2.text_input("Пароль", type="password")
-            new_role = c3.selectbox("Роль", auth_db.ROLES)
+            new_username = c1.text_input("Логин", value=st.session_state.get("_gen_username", ""))
+            new_password = c2.text_input("Пароль", value=st.session_state.get("_gen_password", ""))
+            _role_default = auth_db.ROLES.index("user") if "user" in auth_db.ROLES else 0
+            new_role = c3.selectbox("Роль", auth_db.ROLES, index=_role_default)
             plan_options = ["— без тарифа —"] + [p["code"] for p in auth_db.get_plans()]
-            new_plan_sel = st.selectbox("Тариф", plan_options)
+            pcol1, pcol2, pcol3 = st.columns(3)
+            new_plan_sel = pcol1.selectbox("Тариф", plan_options)
+            new_end_date = pcol2.date_input("Срок доступа до даты (пусто = по тарифу/бессрочно)", value=None)
+            new_limit_override = pcol3.number_input("Лимит анализов (0 = по тарифу/без лимита)",
+                                                      min_value=0, value=0, step=1)
             cc1, cc2, cc3 = st.columns(3)
             new_company = cc1.text_input("Компания")
             new_phone = cc2.text_input("Телефон")
             new_email = cc3.text_input("Email")
-            new_notes = st.text_area("Комментарий", height=68)
+            new_notes = st.text_area("Комментарий администратора", height=68)
             create_submitted = st.form_submit_button("Создать пользователя", type="primary")
         if create_submitted:
             plan_val = None if new_plan_sel == "— без тарифа —" else new_plan_sel
             uname = (new_username or "").strip()
+            pwd_val = new_password or ""
+            end_date_val = new_end_date.isoformat() if new_end_date else None
+            limit_val = int(new_limit_override) if new_limit_override else None
             ok, msg = auth_db.create_user(
-                uname, new_password or "", role=new_role, plan=plan_val,
+                uname, pwd_val, role=new_role, plan=plan_val,
+                access_end_date=end_date_val, analysis_limit=limit_val,
+                full_name=(gen_full_name or "").strip() or None,
                 company_name=new_company or None, phone=new_phone or None,
                 email=new_email or None, notes=new_notes or None, created_by=user["username"],
             )
@@ -1245,10 +1431,28 @@ def page_admin():
                 created = auth_db.get_user(uname)
                 _audit(created["id"] if created else None, uname, "create_user",
                        f"роль={new_role}, тариф={plan_val or 'нет'}", admin=user)
+                expires_label = ((created.get("access_end_date") if created else end_date_val) or "бессрочно")
+                whatsapp_text = (
+                    "Здравствуйте! Вам открыт доступ к TaxMasterKZ.\n\n"
+                    f"Ссылка для входа:\n{APP_PUBLIC_URL}\n\n"
+                    f"Логин:\n{uname}\n\n"
+                    f"Пароль:\n{pwd_val}\n\n"
+                    f"Срок доступа:\n{expires_label}\n\n"
+                    "Пожалуйста, не передавайте логин и пароль третьим лицам.\n\n"
+                    "Если возникнут вопросы — напишите в WhatsApp."
+                )
+                st.session_state["_last_created_user_text"] = whatsapp_text
+                st.session_state["_gen_username"] = ""
+                st.session_state["_gen_password"] = ""
                 st.success(msg)
                 st.rerun()
             else:
                 st.error(msg)
+
+        if st.session_state.get("_last_created_user_text"):
+            st.markdown("**Текст для отправки пользователю** (скопируйте и отправьте в WhatsApp):")
+            st.text_area("Текст для отправки пользователю", value=st.session_state["_last_created_user_text"],
+                          height=220, key="_last_created_user_text_area", label_visibility="collapsed")
 
     st.divider()
     st.subheader("Пользователи")
@@ -1293,7 +1497,7 @@ def page_admin():
         limit = u.get("analysis_limit")
         used = u.get("analysis_used") or 0
         overview_rows.append({
-            "Логин": u["username"], "Роль": u["role"], "Тариф": u.get("plan") or "—",
+            "Логин": u["username"], "ФИО": u.get("full_name") or "—", "Роль": u["role"], "Тариф": u.get("plan") or "—",
             "Статус": u["status"], "Оплата": u.get("payment_status") or "—",
             "Доступ до": u.get("access_end_date") or u.get("expiry_date") or "бессрочно",
             "Лимит": str(limit) if limit is not None else "∞", "Использовано": str(used),
@@ -1498,14 +1702,34 @@ def page_access():
     if not user:
         st.warning("Вы не авторизованы.")
         return
-    role_label = {"admin": "администратор", "user": "пользователь", "demo": "демо-доступ"}.get(user["role"], user["role"])
-    st.markdown(f"**Логин:** {user['username']}")
+    fresh = auth_db.get_user_by_id(user["id"]) or user  # свежие данные лимита/статуса из БД
+
+    role_label = {"admin": "администратор", "user": "пользователь", "demo": "демо-доступ"}.get(fresh["role"], fresh["role"])
+    if fresh["status"] == "blocked":
+        status_label = "🔴 заблокирован"
+    else:
+        _ok, _ = auth_db.check_access(fresh)
+        status_label = "🟢 активен" if _ok else "🟠 истёк"
+
+    limit = fresh.get("analysis_limit")
+    used = fresh.get("analysis_used") or 0
+
+    st.markdown(f"**Логин:** {fresh['username']}")
     st.markdown(f"**Роль:** {role_label}")
-    st.markdown(f"**Тариф:** {user.get('plan') or 'не назначен'}")
-    st.markdown(f"**Срок действия доступа:** {user.get('access_end_date') or user.get('expiry_date') or 'бессрочно'}")
-    st.markdown(f"**Дата создания учётной записи:** {user['created_at']}")
-    st.markdown(f"**Последний вход:** {user['last_login'] or 'текущий вход — первый'}")
-    st.caption("Подробности по лимиту анализов и оплате — на странице «Мой тариф».")
+    st.markdown(f"**Статус доступа:** {status_label}")
+    st.markdown(f"**Тариф:** {fresh.get('plan') or 'не назначен'}")
+    st.markdown(f"**Срок действия доступа:** {fresh.get('access_end_date') or fresh.get('expiry_date') or 'бессрочно'}")
+    st.markdown(f"**Анализов доступно:** {limit if limit is not None else 'без лимита'}")
+    st.markdown(f"**Анализов использовано:** {used}")
+    st.markdown(f"**Дата создания учётной записи:** {fresh['created_at']}")
+    st.markdown(f"**Последний вход:** {fresh['last_login'] or 'текущий вход — первый'}")
+    st.caption("Подробности по тарифам и оплате — на странице «Мой тариф».")
+
+    st.divider()
+    st.subheader("Ссылка для входа")
+    st.markdown("Для входа используйте эту ссылку и свои логин/пароль.")
+    st.code(APP_PUBLIC_URL, language=None)
+
     st.divider()
     st.subheader("Контакты TaxMasterKZ")
     st.markdown(contact_badges_html(), unsafe_allow_html=True)
